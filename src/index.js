@@ -1,129 +1,105 @@
-// src/index.js
-// Node.js v20+ / ESM ("type":"module") 前提
-
-import * as fs from 'node:fs';
+#!/usr/bin/env node
 
 /**
- * 入力読み込み
- * 標準入力から全ての行を読み込み、配列に変換する
- * 行の前後の空白を除去し、空行は除外
- */
-const inputText = fs.readFileSync(process.stdin.fd, 'utf-8');
-const lines = inputText.split(/\r?\n/).map(line => line.trim()).filter(line => line !== '');
-
-/**
- * グラフ構築
- * - 入力形式: 始点ID, 終点ID, 距離
- * - 各行をパースし、有向グラフを隣接リスト形式で保持
- */
-const graph = new Map();
-const nodes = new Set();
-for (const line of lines) {
-    const [fromStr, toStr, distStr] = line.split(',').map(part => part.trim());
-    if (!fromStr || !toStr || !distStr) continue;
-    const from = Number.parseInt(fromStr, 10);
-    const to = Number.parseInt(toStr, 10);
-    const dist = Number.parseFloat(distStr);
-    if (Number.isNaN(from) || Number.isNaN(to) || Number.isNaN(dist)) continue;
-
-    nodes.add(from);
-    nodes.add(to);
-    if (!graph.has(from)) {
-        graph.set(from, []);
-    }
-    graph.get(from).push({ node: to, dist: dist });
-}
-// 出現したノードがグラフに存在しない場合も空配列をセット
-for (const n of nodes) {
-    if (!graph.has(n)) graph.set(n, []);
-}
-
-/**
- * 枝刈り用の前処理
- * - グラフ内の全ての辺の距離を降順ソート
- * - prefix sum を計算して「残り最大でこれだけ距離が伸ばせる」上界を推定
- */
-const allEdges = [];
-for (const neighbors of graph.values()) {
-    for (const { dist } of neighbors) {
-        allEdges.push(dist);
-    }
-}
-allEdges.sort((a, b) => b - a);
-const prefixSum = [0];
-for (let i = 0; i < allEdges.length; i++) {
-    prefixSum[i + 1] = prefixSum[i] + allEdges[i];
-}
-const totalEdges = allEdges.length;
-const totalNodes = nodes.size;
-
-/**
- * 最良経路を記録する変数
- * - bestDistance: 最長距離
- * - bestPath: 経路（駅IDの配列）
- */
-let bestDistance = Number.NEGATIVE_INFINITY;
-let bestPath = [];
-
-/**
- * DFS (深さ優先探索)
- * - サイクルを含む場合でも「同じ点を2回通らない」単純経路を探索
- * - 枝刈り: 残りのノード数から理論上取り得る最大距離を計算し、
- *   それでも既知の最長距離を超えられない場合は探索を打ち切る
+ * グラフ上で「同じ点を2回通らない最長経路」を探索するプログラム
  * 
- * @param {number} current 現在のノード
- * @param {number} start   始点（サイクル判定用）
- * @param {Set<number>} visited 訪問済みノード集合
- * @param {number} distance 現在までの総距離
- * @param {number[]} path 現在の経路
+ * - 入力は標準入力から読み込み、1行ごとに "u, v, w" 形式
+ * - 出力は最長経路に含まれるノードIDを改行区切りで表示
+ * - DFS + 枝刈りで最長単純経路を探索
  */
-function dfs(current, start, visited, distance, path) {
-    // ---- 枝刈り判定 ----
+
+import fs from "fs";
+
+/**
+ * エントリーポイント
+ */
+function main() {
+  const input = fs.readFileSync(0, "utf8").trim().split("\n");
+  if (input.length === 0 || (input.length === 1 && input[0] === "")) return;
+
+  console.log(solve(input));
+}
+
+/**
+ * 与えられた入力から最長経路を求める
+ * @param {string[]} inputLines - "u, v, w" の形式の文字列配列
+ * @returns {string} - 最長経路のノード列を改行区切りにした文字列
+ */
+export function solve(inputLines) {
+  // -------------------------------
+  // 入力処理
+  // -------------------------------
+  const edges = [];
+  const nodes = new Set();
+
+  for (const line of inputLines) {
+    if (!line.trim()) continue;
+    const [a, b, c] = line.split(",").map(s => s.trim());
+    const u = Number(a), v = Number(b), w = Number(c);
+    edges.push([u, v, w]);
+    nodes.add(u);
+    nodes.add(v);
+  }
+
+  const totalNodes = nodes.size;
+
+  // 隣接リストの構築
+  const graph = new Map();
+  for (const n of nodes) graph.set(n, []);
+  for (const [u, v, w] of edges) {
+    graph.get(u).push({ node: v, dist: w });
+  }
+
+  // エッジを距離降順でソート（上界計算用）
+  const sortedEdges = edges.map(e => e[2]).sort((a, b) => b - a);
+  const prefixSum = [0];
+  for (let i = 0; i < sortedEdges.length; i++) {
+    prefixSum[i + 1] = prefixSum[i] + sortedEdges[i];
+  }
+  const totalEdges = sortedEdges.length;
+
+  // -------------------------------
+  // DFS による最長経路探索
+  // -------------------------------
+  let bestDistance = -1;
+  let bestPath = [];
+
+  function dfs(current, visited, distance, path) {
+    // --- 枝刈り ---
     const remainingNodes = totalNodes - visited.size;
     const maxEdgesPossible = Math.min(remainingNodes, totalEdges);
     const maxPotentialDist = prefixSum[maxEdgesPossible] || 0;
-    if (distance + maxPotentialDist <= bestDistance) {
-        return; // これ以上探索しても最良経路を更新できない
-    }
+    if (distance + maxPotentialDist <= bestDistance) return;
 
-    // ---- 隣接ノードを探索 ----
+    let extended = false;
     for (const { node: next, dist: w } of graph.get(current)) {
-        if (next === start) {
-            // 始点に戻る辺があれば、それも「最長経路」の候補になる
-            const totalDist = distance + w;
-            if (totalDist > bestDistance) {
-                bestDistance = totalDist;
-                bestPath = [...path, next];
-            }
-        } else if (!visited.has(next)) {
-            // 未訪問ノードのみ探索
-            visited.add(next);
-            path.push(next);
-            dfs(next, start, visited, distance + w, path);
-            path.pop();
-            visited.delete(next);
-        }
+      if (!visited.has(next)) {
+        extended = true;
+        visited.add(next);
+        path.push(next);
+        dfs(next, visited, distance + w, path);
+        path.pop();
+        visited.delete(next);
+      }
     }
-}
 
-/**
- * 全てのノードを始点にDFSを実行
- * → 最長経路を探索
- */
-for (const startNode of nodes) {
+    // これ以上進めない場合に最長経路を更新
+    if (!extended && distance > bestDistance) {
+      bestDistance = distance;
+      bestPath = path.slice();
+    }
+  }
+
+  // 各ノードを始点に探索
+  for (const startNode of nodes) {
     const visited = new Set([startNode]);
-    dfs(startNode, startNode, visited, 0, [startNode]);
+    dfs(startNode, visited, 0, [startNode]);
+  }
+
+  return bestPath.join("\r\n");
 }
 
-// 辺が1つもない場合など、経路が見つからなければ適当に1ノード出力
-if (!bestPath.length && nodes.size > 0) {
-    bestPath = [nodes.values().next().value];
+// 実行
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main();
 }
-
-/**
- * 出力
- * - 問題文に従い CRLF (`\r\n`) 区切りで出力
- * - 最後も CRLF で終わるようにする
- */
-const outputStr = bestPath.map(id => id.toString()).join('\r\n');
-process.stdout.write(outputStr + '\r\n');
